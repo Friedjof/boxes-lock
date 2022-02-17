@@ -7,7 +7,6 @@
 #include <MFRC522.h>
 
 char auth();
-void print_wakeup_reason();
 
 // Servo Pin GPIO 18
 #define servoPin 17
@@ -17,51 +16,90 @@ void print_wakeup_reason();
 // ESP32 pin GPIO 27
 #define RST_PIN 27
 
-// Deep Sleep
-#define uS_TO_S_FACTOR 1000000ULL
-#define TIME_TO_SLEEP  60
+// IRQ - RFID Interrupt
+#define IRQ_PIN 26
 
-RTC_DATA_ATTR int bootCount = 0;
+// timer to sleep after inactivity [in secunds]
+#define time2sleep 10
 
 // RFID UID
 char myRFID_UID[4] = {0xC7, 0xD1, 0xB8, 0x79};
 
-// Servo timer
-//unsigned long int servoMotorTimer = millis();
+volatile bool cardPresent = false;
 
-// {x, x, x, x, x, cached lock status, lock status}
+// action timer
+unsigned long int actionTimer = millis();
+
+// {x, x, x, x, x, x, cached lock status, lock status}
 char mainBools = 0x00;
+char mainResult = 0x00;
 
-MFRC522 rfid(SS_PIN, RST_PIN);
+MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo myservo;
+
+void isr()
+{
+  cardPresent = true;
+}
 
 void setup() {
   myservo.attach(servoPin, 500, 2400);
 
+  // esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, FALLING);
+
   Serial.begin(115200);
-  delay(1000);
 
-  bootCount++;
-  Serial.println("Boot number: " + String(bootCount));
-  print_wakeup_reason();
-
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-  Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) + " Seconds");
+  Serial.println("-- Start --");
 
   // init SPI bus
   SPI.begin();
   // init MFRC522
-  rfid.PCD_Init();
+  mfrc522.PCD_Init();
+  // Clear interrupts
+  mfrc522.PCD_WriteRegister(MFRC522::ComIrqReg, 0x80);
+  // Enable all interrupts
+  mfrc522.PCD_WriteRegister(MFRC522::ComIEnReg, 0xA0);
+  mfrc522.PCD_WriteRegister(MFRC522::DivIEnReg, 0x14);
 
+  pinMode(IRQ_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IRQ_PIN), isr, FALLING);
+
+  // Schließe das Schlosses
   myservo.write(180);
-
-  Serial.println("Going to sleep now");
-  Serial.flush(); 
-  esp_deep_sleep_start();
 }
 
 void loop()
 {
+  if (millis() - actionTimer > (time2sleep * 1000) && 0x00)
+  {
+    Serial.println(">> Sleep");
+    esp_deep_sleep_start();
+  }
+  else
+  { }
+
+  if (cardPresent)
+  {
+    Serial.println(">> interrupt");
+    // Clear interrupts
+    mfrc522.PCD_WriteRegister(MFRC522::ComIrqReg, 0x80);
+    cardPresent = false;
+  }
+  else
+  { }
+
+  mainResult = digitalRead(IRQ_PIN);
+
+  if (mainResult ^ ((mainBools & 0x04) >> 0x02))
+  {
+    Serial.println(">> trigger");
+
+    mainBools = 0x04 ^ mainBools;
+  }
+  else
+  { }
+
+  // Wenn sich der Schloss Status verändert hat:
   if ((mainBools & 0x01) ^ ((mainBools & 0x02) >> 0x01))
   {
     // auf
@@ -82,26 +120,28 @@ void loop()
   }
 
   // new tag is available
-  if (rfid.PICC_IsNewCardPresent())
+  if (mfrc522.PICC_IsNewCardPresent())
   {
     // NUID has been readed
-    if (rfid.PICC_ReadCardSerial())
+    if (mfrc522.PICC_ReadCardSerial())
     {
       if (auth())
       {
         mainBools = 0x01 ^ mainBools;
+
+        Serial.println("RFID: Token 01");
       }
       else
       {
         mainBools = mainBools & 0xFE;
       }
 
-      Serial.println(auth(), HEX);
+      actionTimer = millis();
 
       // halt PICC
-      rfid.PICC_HaltA();
+      mfrc522.PICC_HaltA();
       // stop encryption on PCD
-      rfid.PCD_StopCrypto1();
+      mfrc522.PCD_StopCrypto1();
     }
     else
     { }
@@ -112,30 +152,11 @@ void loop()
 
 char auth()
 {
-    for (int i = 0; i < rfid.uid.size; i++) {
-      if (myRFID_UID[i] != rfid.uid.uidByte[i])
+    for (int i = 0; i < mfrc522.uid.size; i++) {
+      if (myRFID_UID[i] != mfrc522.uid.uidByte[i])
       {
         return 0x00;
       }
     }
     return 0x01;
-}
-
-void print_wakeup_reason()
-{
-  esp_sleep_wakeup_cause_t wakeup_reason;
-
-  wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  switch(wakeup_reason)
-  {
-    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
-    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
-    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
-    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
-    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
-  }
-
-  myservo.write(20);
 }
