@@ -5,6 +5,8 @@
 #include <ESP32_Servo.h>
 #include <SPI.h>
 #include <MFRC522.h>
+#include <Adafruit_NeoPixel.h>
+
 
 char auth();
 
@@ -22,6 +24,13 @@ char auth();
 // timer to sleep after inactivity [in secunds]
 #define time2sleep 10
 
+#define neoPixelPIN 15
+
+// When we setup the NeoPixel library, we tell it how many pixels, and which pin to use to send signals.
+// Note that for older NeoPixel strips you might need to change the third parameter--see the strandtest
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(1, neoPixelPIN, NEO_GRB + NEO_KHZ800);
+
+
 // RFID UID
 char myRFID_UID[4] = {0xC7, 0xD1, 0xB8, 0x79};
 
@@ -30,12 +39,18 @@ volatile bool cardPresent = false;
 // action timer
 unsigned long int actionTimer = millis();
 
+// NeoPixel timer
+unsigned long int neoPixelTimer = millis();
+
 // {x, x, x, x, x, x, cached lock status, lock status}
 char mainBools = 0x00;
 char mainResult = 0x00;
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo myservo;
+
+// Prototypen
+void neoPixel();
 
 void isr()
 {
@@ -46,6 +61,9 @@ void setup() {
   myservo.attach(servoPin, 500, 2400);
 
   // esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, FALLING);
+
+  // This initializes the NeoPixel library.
+  pixels.begin();
 
   Serial.begin(115200);
 
@@ -77,6 +95,12 @@ void loop()
   }
   else
   { }
+
+  if (millis() - neoPixelTimer > 200)
+  {
+    neoPixel();
+    neoPixelTimer = millis();
+  }
 
   if (cardPresent)
   {
@@ -159,4 +183,18 @@ char auth()
       }
     }
     return 0x01;
+}
+
+void neoPixel()
+{
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j < 2; j++) {
+      for (int k = 0; k < 2; k++) {
+        // Moderately bright green color.
+        pixels.setPixelColor(0, pixels.Color(i * 255, j * 255, k * 255));
+        // This sends the updated pixel color to the hardware.
+        pixels.show();
+      }
+    }
+  }
 }
