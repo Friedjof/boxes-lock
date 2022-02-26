@@ -2,11 +2,12 @@
 // 13.02.2022 So
 
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
 #include <ESP32_Servo.h>
 #include <SPI.h>
 #include <MFRC522.h>
 
-char auth();
+#define ledPin 22
 
 // Servo Pin GPIO 18
 #define servoPin 17
@@ -22,6 +23,21 @@ char auth();
 // timer to sleep after inactivity [in secunds]
 #define time2sleep 10
 
+// Magnet Sensor
+#define magnetSensorPin 4
+
+// Prototype
+void boxLighting(int index, uint32_t color);
+void boxLightingSpecial(uint32_t color);
+void clearLED();
+char auth();
+
+char ledRange[4][2] = {{0, 19}, {19, 30}, {30, 50}, {50, 60}};
+
+char step = 0;
+char colorStatus = 1;
+char effect = 0;
+
 // RFID UID
 char myRFID_UID[4] = {0xC7, 0xD1, 0xB8, 0x79};
 
@@ -30,27 +46,24 @@ volatile bool cardPresent = false;
 // action timer
 unsigned long int actionTimer = millis();
 
-// {x, x, x, x, x, x, cached lock status, lock status}
-char mainBools = 0x00;
+// {x, x, x, x, x, lastMagnetSensorStatus, cached lock status, lock status}
+char mainBools = 0x04;
 char mainResult = 0x00;
+
+// Timer
+unsigned long int effectTimer = millis();
+
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(60, ledPin, NEO_GRB + NEO_KHZ800);
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo myservo;
 
-void isr()
+void setup()
 {
-  cardPresent = true;
-}
-
-void setup() {
-  myservo.attach(servoPin, 500, 2400);
-
-  // esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, FALLING);
-
   Serial.begin(115200);
 
-  Serial.println("-- Start --");
-
+  myservo.attach(servoPin, 500, 2400);
+  
   // init SPI bus
   SPI.begin();
   // init MFRC522
@@ -62,39 +75,72 @@ void setup() {
   mfrc522.PCD_WriteRegister(MFRC522::DivIEnReg, 0x14);
 
   pinMode(IRQ_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(IRQ_PIN), isr, FALLING);
+  pinMode(magnetSensorPin, INPUT_PULLUP);
 
   // Schließe das Schlosses
   myservo.write(180);
+
+  strip.begin();
+  strip.setBrightness(50);
+  strip.show();
 }
 
 void loop()
 {
+  mainResult = digitalRead(magnetSensorPin);
+
+  if (mainResult ^ ((mainBools & 0x04) >> 0x02))
+  {
+    if (mainResult)
+    {
+      effect = 0x01;
+    }
+    else
+    {
+      effect = 0x00;
+      step = 0;
+      colorStatus = 1;
+      clearLED();
+    }
+
+    Serial.print("Magnet Sensor: ");
+    Serial.println(mainResult, BIN);
+
+    mainBools = 0x04 ^ mainBools;
+  }
+
+  if (effect)
+  {
+    boxLightingSpecial(strip.Color(50 * colorStatus, 25 * colorStatus, 2 * colorStatus));
+
+    if (millis() - effectTimer > 50)
+    {
+      if (step < 15)
+      {
+        step++;
+      }
+      else
+      {
+        step = 0;
+        if (colorStatus < 3)
+        {
+          colorStatus++;
+        }
+        else
+        {
+          colorStatus = 1;
+          effect = 0;
+        }
+      }
+
+      effectTimer = millis();
+    }
+  }
+
   if (millis() - actionTimer > (time2sleep * 1000) && 0x00)
   {
     Serial.println(">> Sleep");
     esp_deep_sleep_start();
-  }
-  else
-  { }
-
-  if (cardPresent)
-  {
-    Serial.println(">> interrupt");
-    // Clear interrupts
-    mfrc522.PCD_WriteRegister(MFRC522::ComIrqReg, 0x80);
-    cardPresent = false;
-  }
-  else
-  { }
-
-  mainResult = digitalRead(IRQ_PIN);
-
-  if (mainResult ^ ((mainBools & 0x04) >> 0x02))
-  {
-    Serial.println(">> trigger");
-
-    mainBools = 0x04 ^ mainBools;
   }
   else
   { }
@@ -118,6 +164,8 @@ void loop()
     // toggle cached lock status
     mainBools = 0x02 ^ mainBools;
   }
+  else
+  { }
 
   // new tag is available
   if (mfrc522.PICC_IsNewCardPresent())
@@ -159,4 +207,42 @@ char auth()
       }
     }
     return 0x01;
+}
+
+void boxLighting(int index, uint32_t color)
+{
+  for (char i = ledRange[index][0]; i < ledRange[index][1]; i++)
+  {
+    strip.setPixelColor(i, color);
+  }
+
+  strip.show();
+}
+
+void clearLED()
+{
+  for (char i = 0; i < 60; i++)
+  {
+    strip.setPixelColor(i, strip.Color(0, 0, 0));
+  }
+
+  strip.show();
+}
+
+void boxLightingSpecial(uint32_t color)
+{
+  strip.setPixelColor(10 + step, color);
+  strip.setPixelColor(39 - step, color);
+  strip.setPixelColor(40 + step, color);
+
+  if (9 - step < 0)
+  {
+    strip.setPixelColor(69 - step, color);
+  }
+  else
+  {
+    strip.setPixelColor(9 - step, color);
+  }
+
+  strip.show();
 }
