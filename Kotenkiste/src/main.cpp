@@ -6,8 +6,29 @@
 #include <ESP32_Servo.h>
 #include <SPI.h>
 #include <MFRC522.h>
+#include "Button2.h"
 
+/*
+ * Button:
+ * right = 25
+ * left  = 35
+ * 
+ * LEDs:
+ * red   = 32
+ * green = 26
+ */
+
+// Bottons
+#define buttonPinRight 25
+#define buttonPinLeft 35
+
+// LEDs
+#define redLEDpin 32
+#define greenLEDpin 26
+
+// LED Stipe data line
 #define ledPin 22
+#define totalLEDs 60
 
 // Servo Pin GPIO 18
 #define servoPin 17
@@ -27,16 +48,32 @@
 #define magnetSensorPin 4
 
 // Prototype
+void callbackRightButton(Button2& btn);
+void callbackRightButtonLongClick(Button2& btn);
+
+void callbackLeftButton(Button2& btn);
+void callbackRightButtonDoubleClick(Button2& btn);
+
 void boxLighting(int index, uint32_t color);
 void boxLightingSpecial(uint32_t color);
 void clearLED();
+uint32_t Wheel(byte WheelPos);
 char auth();
 
-char ledRange[4][2] = {{0, 19}, {19, 30}, {30, 50}, {50, 60}};
+Button2 rightButton, leftButton;
+
+char ledRange[4][2] = {{0, 20}, {20, 30}, {30, 50}, {50, 60}};
 
 char step = 0;
 char colorStatus = 1;
 char effect = 0;
+
+char lightMode = 0x00;
+char specialLightMode = 0x00;
+char specialLightModeRun = 0x01;
+int specialLightModeCounter = 0;
+int specialLightModeCounterMAX = 256;
+int snakeLenght = 30;
 
 // RFID UID
 char myRFID_UID[4] = {0xC7, 0xD1, 0xB8, 0x79};
@@ -45,10 +82,15 @@ volatile bool cardPresent = false;
 
 // action timer
 unsigned long int actionTimer = millis();
+unsigned long int specialLightModeTimer = millis();
 
 // {x, x, x, x, x, lastMagnetSensorStatus, cached lock status, lock status}
-char mainBools = 0x04;
+char mainBools = 0x00;
 char mainResult = 0x00;
+
+
+char buttonBools = 0x00;
+char resultButtonBool = 0x00;
 
 // Timer
 unsigned long int effectTimer = millis();
@@ -63,6 +105,18 @@ void setup()
   Serial.begin(115200);
 
   myservo.attach(servoPin, 500, 2400);
+
+  // Config Buttons
+  rightButton.setLongClickTime(2000);
+  rightButton.setDoubleClickTime(50);
+
+  rightButton.begin(buttonPinRight);
+  rightButton.setClickHandler(callbackRightButton);
+  rightButton.setLongClickHandler(callbackRightButtonLongClick);
+
+  leftButton.begin(buttonPinLeft);
+  leftButton.setClickHandler(callbackLeftButton);
+  leftButton.setDoubleClickHandler(callbackRightButtonDoubleClick);
   
   // init SPI bus
   SPI.begin();
@@ -77,8 +131,21 @@ void setup()
   pinMode(IRQ_PIN, INPUT_PULLUP);
   pinMode(magnetSensorPin, INPUT_PULLUP);
 
+  pinMode(magnetSensorPin, INPUT_PULLUP);
+  pinMode(magnetSensorPin, INPUT_PULLUP);
+
+  pinMode(redLEDpin, OUTPUT);
+  pinMode(greenLEDpin, OUTPUT);
+
+  pinMode(buttonPinRight, INPUT_PULLUP);
+  pinMode(buttonPinLeft, INPUT_PULLUP);
+
   // Schließe das Schlosses
   myservo.write(180);
+
+  // LEDs off
+  digitalWrite(redLEDpin, HIGH);
+  digitalWrite(greenLEDpin, HIGH);
 
   strip.begin();
   strip.setBrightness(50);
@@ -87,6 +154,50 @@ void setup()
 
 void loop()
 {
+  rightButton.loop();
+  leftButton.loop();
+
+  if (specialLightMode && millis() - specialLightModeTimer > 20)
+  {
+    if (specialLightMode > 0x00 && (specialLightModeRun & 0x01))
+    {
+      if (specialLightModeCounter < specialLightModeCounterMAX)
+      {
+        specialLightModeCounter++;
+      }
+      else
+      {
+        specialLightModeCounter = 0;
+      }
+    }
+
+    if (specialLightMode == 0x01)
+    {
+      for(int i = 0; i < strip.numPixels(); i++) {
+        strip.setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + specialLightModeCounter) & 255));
+      }
+      strip.show();
+    }
+    else if (specialLightMode == 0x02)
+    {
+      if (specialLightModeCounter - snakeLenght < 0)
+      {
+        strip.setPixelColor((specialLightModeCounter - snakeLenght) + specialLightModeCounterMAX, strip.Color(0, 255, 0));
+      }
+      else
+      {
+        strip.setPixelColor(specialLightModeCounter - snakeLenght, strip.Color(0, 255, 0));
+      }
+
+      // strip.setPixelColor(specialLightModeCounter, strip.Color(150, 75, 6));
+      strip.setPixelColor(specialLightModeCounter, strip.Color(255, 0, 0));
+
+      strip.show();
+    }
+
+    specialLightModeTimer = millis();
+  }
+
   mainResult = digitalRead(magnetSensorPin);
 
   if (mainResult ^ ((mainBools & 0x04) >> 0x02))
@@ -100,6 +211,10 @@ void loop()
       effect = 0x00;
       step = 0;
       colorStatus = 1;
+
+      specialLightMode = 0x00;
+      specialLightModeCounter = 0;
+
       clearLED();
     }
 
@@ -170,6 +285,7 @@ void loop()
   // new tag is available
   if (mfrc522.PICC_IsNewCardPresent())
   {
+    Serial.println("RFID Card present");
     // NUID has been readed
     if (mfrc522.PICC_ReadCardSerial())
     {
@@ -245,4 +361,78 @@ void boxLightingSpecial(uint32_t color)
   }
 
   strip.show();
+}
+
+void callbackRightButton(Button2& btn)
+{
+  Serial.println(">> right");
+  if (((mainBools & 0x04) >> 0x02))
+  {
+    effect = 0x00;
+    step = 0;
+    colorStatus = 1;
+
+    specialLightMode = 0x00;
+
+    clearLED();
+
+    if (lightMode == 0x01)
+    {
+      boxLighting(0, strip.Color(150, 75, 6));
+      boxLighting(2, strip.Color(150, 75, 6));
+    }
+    else if (lightMode == 0x02)
+    {
+      boxLighting(1, strip.Color(150, 75, 6));
+      boxLighting(3, strip.Color(150, 75, 6));
+    }
+    else if (lightMode == 0x03)
+    {
+      specialLightModeCounter = 0;
+      specialLightModeCounterMAX = 256;
+      specialLightMode = 0x01;
+    }
+    else if (lightMode == 0x04)
+    {
+      specialLightModeCounter = 0;
+      specialLightModeCounterMAX = totalLEDs;
+      specialLightMode = 0x02;
+    }
+  }
+
+  if (lightMode < 0x04)
+  {
+    lightMode++;
+  }
+  else
+  {
+    lightMode = 0x00;
+  }
+}
+
+void callbackRightButtonLongClick(Button2& btn)
+{
+  specialLightModeRun = 0x01 ^ specialLightModeRun;
+}
+
+void callbackLeftButton(Button2& btn)
+{ }
+
+void callbackRightButtonDoubleClick(Button2& btn)
+{ }
+
+// Input a value 0 to 255 to get a color value.
+// The colours are a transition r - g - b - back to r.
+uint32_t Wheel(byte WheelPos)
+{
+  WheelPos = 255 - WheelPos;
+  if(WheelPos < 85) {
+    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  }
+  if(WheelPos < 170) {
+    WheelPos -= 85;
+    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+  WheelPos -= 170;
+  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
 }
