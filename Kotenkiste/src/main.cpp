@@ -24,6 +24,17 @@
  * green = 26
  */
 
+// https://github.com/espressif/arduino-esp32/issues/3634
+#if (RH_PLATFORM == RH_PLATFORM_ESP8266)
+    // interrupt handler and related code must be in RAM on ESP8266,
+    // according to issue #46.
+    #define INTERRUPT_ATTR ICACHE_RAM_ATTR
+#elif (RH_PLATFORM == RH_PLATFORM_ESP32)
+    #define INTERRUPT_ATTR IRAM_ATTR 
+#else
+    #define INTERRUPT_ATTR
+#endif
+
 // Bottons
 #define buttonPinRight 25
 #define buttonPinLeft 35
@@ -48,15 +59,23 @@
 #define IRQ_PIN 26
 
 // timer to sleep after inactivity [in secunds]
-#define time2sleep 10
+#define time2sleep 60
 
 // Magnet Sensor
 #define magnetSensorPin 4
 
+// Greater the value, more the sensitivity
+#define Threshold 40
+
+// Servo Motor Winkel
+#define auf 20
+#define zu 180
+
+
 // Allocate a temporary JsonDocument
 // Don't forget to change the capacity to match your requirements.
 // Use https://arduinojson.org/v6/assistant to compute the capacity.
-StaticJsonDocument<1024> configDoc;
+StaticJsonDocument<2048> configDoc;
 
 // Structs
 struct Config {
@@ -66,6 +85,7 @@ struct Config {
   JsonArray masterKey;
   JsonArray nullArray;
   int lastAdminKeyIndex;
+  char lockStatus;
 };
 
 // Prototype
@@ -87,6 +107,8 @@ void loadConfiguration(const char *filename);
 void saveGlobalConfiguration();
 void getCurrentKeyID();
 char authorizeCard();
+
+void callback();
 
 Config globalConfig;
 
@@ -110,6 +132,7 @@ volatile bool cardPresent = false;
 // action timer
 unsigned long int actionTimer = millis();
 unsigned long int specialLightModeTimer = millis();
+unsigned long int timeoutTimer = millis();
 
 // {x, x, x, delCardIdMode, addCardIdMode, lastMagnetSensorStatus, cached lock status, lock status}
 char mainBools = 0x00;
@@ -122,7 +145,7 @@ char resultButtonBool = 0x00;
 // Timer
 unsigned long int effectTimer = millis();
 
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(60, ledPin, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(totalLEDs, ledPin, NEO_GRB + NEO_KHZ800);
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo myservo;
@@ -132,6 +155,11 @@ File configFile;
 void setup()
 {
   Serial.begin(115200);
+
+  //Setup interrupt on Touch Pad 3 (GPIO15)
+  touchAttachInterrupt(T3, callback, Threshold);
+  //Configure Touchpad as wakeup source
+  esp_sleep_enable_touchpad_wakeup();
 
   SPIFFS.begin(true);
 
@@ -179,9 +207,6 @@ void setup()
   pinMode(buttonPinRight, INPUT_PULLUP);
   pinMode(buttonPinLeft, INPUT_PULLUP);
 
-  // Schließe das Schlosses
-  myservo.write(180);
-
   // LEDs off
   digitalWrite(redLEDpin, HIGH);
   digitalWrite(greenLEDpin, HIGH);
@@ -200,6 +225,8 @@ void loop()
 
   if (mainBools & 0x08 || mainBools & 0x10)
   {
+    timeoutTimer = millis();
+
     while (mainBools & 0x08 || mainBools & 0x10)
     {
       leftButton.loop();
@@ -381,6 +408,8 @@ void loop()
 
   if (mainResult ^ ((mainBools & 0x04) >> 0x02))
   {
+    timeoutTimer = millis();
+
     if (mainResult)
     {
       effect = 0x01;
@@ -431,45 +460,37 @@ void loop()
     }
   }
 
-  if (millis() - actionTimer > (time2sleep * 1000) && 0x00)
-  {
-    Serial.println(">> Sleep");
-    esp_deep_sleep_start();
-  }
-  else
-  { }
-
   // Wenn sich der Schloss Status verändert hat:
-  if ((mainBools & 0x01) ^ ((mainBools & 0x02) >> 0x01))
+  if ((globalConfig.lockStatus & 0x01) ^ ((globalConfig.lockStatus & 0x02) >> 0x01))
   {
-    // auf
-    if (mainBools & 0x01)
+    if (globalConfig.lockStatus & 0x01)
     {
-      myservo.write(20);
+      myservo.write(auf);
     }
-    // zu
-    else if (0x01 ^ (mainBools & 0x01))
+    else if (0x01 ^ (globalConfig.lockStatus & 0x01))
     {
-      myservo.write(180);
+      myservo.write(zu);
     }
     else
     { }
 
     // toggle cached lock status
-    mainBools = 0x02 ^ mainBools;
+    globalConfig.lockStatus = 0x02 ^ globalConfig.lockStatus;
   }
   else
   { }
 
   // new tag is available
   if (mfrc522.PICC_IsNewCardPresent() && (mainBools ^ 0x04))
-  { 
+  {
+    timeoutTimer = millis();
+    
     // NUID has been readed
     if (mfrc522.PICC_ReadCardSerial())
     {
       if (authorizeCard())
       {
-        mainBools = 0x01 ^ mainBools;
+        globalConfig.lockStatus = 0x01 ^ globalConfig.lockStatus;
 
         Serial.print("RFID: Token ");
         for (int i = 0; i < globalConfig.adminKeys.size(); i++)
@@ -495,6 +516,20 @@ void loop()
   }
   else
   { }
+
+  if (millis() - timeoutTimer > time2sleep * 1000)
+  {
+    Serial.println("Going to sleep now");
+    Serial.println("Clear LEDs");
+    clearLED();
+
+    Serial.println("Save Configuration");
+    saveGlobalConfiguration();
+
+    Serial.println("Going to sleep now");
+
+    esp_deep_sleep_start();
+  }
 }
 
 void getCurrentKeyID()
@@ -736,6 +771,7 @@ void loadConfiguration(const char *filename) {
   globalConfig.currentKey = configDoc["currentKey"].as<JsonArray>();
   globalConfig.masterKey = configDoc["masterKey"].as<JsonArray>();
   globalConfig.nullArray = configDoc["nullArray"].as<JsonArray>();
+  globalConfig.lockStatus = configDoc["tempConfig"]["lockStatus"].as<char>();
 
   Serial.print("adminKeys: ");
   serializeJson(globalConfig.adminKeys, Serial);
@@ -761,6 +797,8 @@ void saveGlobalConfiguration()
     return;
   }
 
+  configDoc["tempConfig"]["lockStatus"] = globalConfig.lockStatus;
+
   // Serialize JSON to file
   if (serializeJson(configDoc, file) == 0) {
     Serial.println(F("Failed to write to file"));
@@ -769,3 +807,6 @@ void saveGlobalConfiguration()
   // Close the file
   file.close();
 }
+
+void callback()
+{ }
