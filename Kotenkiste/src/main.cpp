@@ -206,8 +206,7 @@ void loop()
 
       // new tag is available
       if (mfrc522.PICC_IsNewCardPresent())
-      {
-        Serial.print("RFID Card: ");
+      { 
         // NUID has been readed
         if (mfrc522.PICC_ReadCardSerial())
         {
@@ -232,7 +231,6 @@ void loop()
 
               if (mfrc522.PICC_IsNewCardPresent())
               {
-                Serial.print("RFID Card: ");
                 // NUID has been readed
                 if (mfrc522.PICC_ReadCardSerial())
                 {
@@ -465,8 +463,7 @@ void loop()
 
   // new tag is available
   if (mfrc522.PICC_IsNewCardPresent() && (mainBools ^ 0x04))
-  {
-    Serial.print("RFID Card: ");
+  { 
     // NUID has been readed
     if (mfrc522.PICC_ReadCardSerial())
     {
@@ -511,23 +508,41 @@ void getCurrentKeyID()
     globalConfig.currentKey.add((unsigned char) mfrc522.uid.uidByte[i]);
   }
 
+  Serial.print("RFID Card: ");
   serializeJson(globalConfig.currentKey, Serial);
   Serial.println();
 }
 
 char authorizeCard()
 {
+  char keyInList = 0x00;
+
   getCurrentKeyID();
 
   for (int index = 0; index < globalConfig.adminKeys.size(); index++)
   {
     if (globalConfig.currentKey == globalConfig.adminKeys[index])
     {
+      keyInList = 0x01;
       globalConfig.lastAdminKeyIndex = index;
-      return 0x01;
     }
   }
-  return 0x00;
+
+  if (keyInList & 0x01)
+  {
+    return 0x01;
+  }
+  else
+  {
+    for (int i = 0; i < 5; i++)
+    {
+      digitalWrite(redLEDpin, LOW);
+      delay(50);
+      digitalWrite(redLEDpin, HIGH);
+      delay(50);
+    }
+    return 0x00;
+  }
 }
 
 void boxLighting(int index, uint32_t color)
@@ -617,6 +632,15 @@ void callbackRightButton(Button2& btn)
 void callbackRightButtonLongClick(Button2& btn)
 {
   specialLightModeRun = 0x01 ^ specialLightModeRun;
+
+  if (0x01 ^ specialLightModeRun)
+  {
+    Serial.println("Stop light mode");
+  }
+  else
+  {
+    Serial.println("Start light mode");
+  }
 }
 
 void callbackRightButtonDoubleClick(Button2& btn)
