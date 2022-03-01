@@ -2,10 +2,16 @@
 // 13.02.2022 So
 
 #include <Arduino.h>
+#include "SPIFFS.h"
+
+#include <ArduinoJson.h>
+
 #include <Adafruit_NeoPixel.h>
 #include <ESP32_Servo.h>
+
 #include <SPI.h>
 #include <MFRC522.h>
+
 #include "Button2.h"
 
 /*
@@ -47,18 +53,42 @@
 // Magnet Sensor
 #define magnetSensorPin 4
 
+// Allocate a temporary JsonDocument
+// Don't forget to change the capacity to match your requirements.
+// Use https://arduinojson.org/v6/assistant to compute the capacity.
+StaticJsonDocument<1024> configDoc;
+
+// Structs
+struct Config {
+  JsonArray defaultKeys;
+  JsonArray adminKeys;
+  JsonArray currentKey;
+  JsonArray masterKey;
+  JsonArray nullArray;
+  int lastAdminKeyIndex;
+};
+
 // Prototype
 void callbackRightButton(Button2& btn);
 void callbackRightButtonLongClick(Button2& btn);
+void callbackRightButtonDoubleClick(Button2& btn);
 
 void callbackLeftButton(Button2& btn);
-void callbackRightButtonDoubleClick(Button2& btn);
+void callbackLeftButtonDoubleClick(Button2& btn);
+void callbackLeftButtonLongClick(Button2& btn);
 
 void boxLighting(int index, uint32_t color);
 void boxLightingSpecial(uint32_t color);
+
 void clearLED();
 uint32_t Wheel(byte WheelPos);
-char auth();
+
+void loadConfiguration(const char *filename);
+void saveGlobalConfiguration();
+void getCurrentKeyID();
+char authorizeCard();
+
+Config globalConfig;
 
 Button2 rightButton, leftButton;
 
@@ -75,16 +105,13 @@ int specialLightModeCounter = 0;
 int specialLightModeCounterMAX = 256;
 int snakeLenght = 30;
 
-// RFID UID
-char myRFID_UID[4] = {0xC7, 0xD1, 0xB8, 0x79};
-
 volatile bool cardPresent = false;
 
 // action timer
 unsigned long int actionTimer = millis();
 unsigned long int specialLightModeTimer = millis();
 
-// {x, x, x, x, x, lastMagnetSensorStatus, cached lock status, lock status}
+// {x, x, x, delCardIdMode, addCardIdMode, lastMagnetSensorStatus, cached lock status, lock status}
 char mainBools = 0x00;
 char mainResult = 0x00;
 
@@ -100,24 +127,36 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(60, ledPin, NEO_GRB + NEO_KHZ800);
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo myservo;
 
+File configFile;
+
 void setup()
 {
   Serial.begin(115200);
 
+  SPIFFS.begin(true);
+
   myservo.attach(servoPin, 500, 2400);
 
+  globalConfig.adminKeys = configDoc.as<JsonArray>();
+  globalConfig.currentKey = configDoc.as<JsonArray>();
+
   // Config Buttons
-  rightButton.setLongClickTime(2000);
-  rightButton.setDoubleClickTime(50);
 
   rightButton.begin(buttonPinRight);
   rightButton.setClickHandler(callbackRightButton);
   rightButton.setLongClickHandler(callbackRightButtonLongClick);
+  rightButton.setDoubleClickHandler(callbackRightButtonDoubleClick);
 
   leftButton.begin(buttonPinLeft);
   leftButton.setClickHandler(callbackLeftButton);
-  leftButton.setDoubleClickHandler(callbackRightButtonDoubleClick);
+  leftButton.setDoubleClickHandler(callbackLeftButtonDoubleClick);
+  leftButton.setLongClickHandler(callbackLeftButtonLongClick);
   
+  rightButton.setLongClickTime(1000);
+  rightButton.setDoubleClickTime(250);
+
+  leftButton.setLongClickTime(5000);
+
   // init SPI bus
   SPI.begin();
   // init MFRC522
@@ -150,12 +189,154 @@ void setup()
   strip.begin();
   strip.setBrightness(50);
   strip.show();
+
+  loadConfiguration("/config.json");
 }
 
 void loop()
 {
   rightButton.loop();
   leftButton.loop();
+
+  if (mainBools & 0x08 || mainBools & 0x10)
+  {
+    while (mainBools & 0x08 || mainBools & 0x10)
+    {
+      leftButton.loop();
+
+      // new tag is available
+      if (mfrc522.PICC_IsNewCardPresent())
+      {
+        Serial.print("RFID Card: ");
+        // NUID has been readed
+        if (mfrc522.PICC_ReadCardSerial())
+        {
+          getCurrentKeyID();
+
+          if (globalConfig.currentKey == globalConfig.masterKey)
+          {
+            // halt PICC
+            mfrc522.PICC_HaltA();
+            // stop encryption on PCD
+            mfrc522.PCD_StopCrypto1();
+
+            digitalWrite(redLEDpin, HIGH);
+            digitalWrite(greenLEDpin, LOW);
+
+            Serial.println("Authorization by master key.");
+
+            // new tag is available
+            while (mainBools & 0x08 || mainBools & 0x10)
+            {
+              leftButton.loop();
+
+              if (mfrc522.PICC_IsNewCardPresent())
+              {
+                Serial.print("RFID Card: ");
+                // NUID has been readed
+                if (mfrc522.PICC_ReadCardSerial())
+                {
+                  getCurrentKeyID();
+
+                  char notInKeys = 0x01;
+
+                  for (int i = 0; i < globalConfig.adminKeys.size(); i++)
+                  {
+                    if (globalConfig.currentKey == globalConfig.adminKeys[i])
+                    {
+                      notInKeys = 0x00;
+                    }
+                  }
+
+                  if (mainBools & 0x10)
+                  {
+                    notInKeys = 0x01 ^ notInKeys;
+                  }
+
+                  if (notInKeys)
+                  {
+                    if (0x10 ^ mainBools && 0x08 & mainBools)
+                    {
+                      if (globalConfig.currentKey == globalConfig.adminKeys[globalConfig.lastAdminKeyIndex])
+                      { }
+                      else
+                      {
+                        globalConfig.adminKeys.add(globalConfig.currentKey);
+
+                        Serial.print("Add chip ");
+                        serializeJson(globalConfig.currentKey, Serial);
+                        Serial.println("...done.");
+
+                        mainBools = mainBools & 0x0F7;
+                        saveGlobalConfiguration();
+                        digitalWrite(greenLEDpin, HIGH);
+                      }
+                    }
+                    else if (0x10 & mainBools && 0x08 ^ mainBools)
+                    {
+
+                      if (globalConfig.currentKey == globalConfig.masterKey)
+                      {
+                        Serial.println("Can not remove master key.");
+                      }
+                      else
+                      {
+                        for (int index = 0; index < globalConfig.adminKeys.size(); index++)
+                        {
+                          if (globalConfig.currentKey == globalConfig.adminKeys[index])
+                          {
+                            globalConfig.adminKeys.remove(index);
+
+                            Serial.print("Chip ");
+                            serializeJson(globalConfig.currentKey, Serial);
+                            Serial.println(" deleted");
+
+                            mainBools = mainBools & 0x0EF;
+                            saveGlobalConfiguration();
+                            digitalWrite(greenLEDpin, HIGH);
+                          }
+                        }
+                      }
+                    }
+                    
+                    // halt PICC
+                    mfrc522.PICC_HaltA();
+                    // stop encryption on PCD
+                    mfrc522.PCD_StopCrypto1();
+                  }
+                }
+                else
+                { }
+              }
+              else
+              { }
+            }
+          }
+          else
+          {
+            // halt PICC
+            mfrc522.PICC_HaltA();
+            // stop encryption on PCD
+            mfrc522.PCD_StopCrypto1();
+
+            Serial.println("This kay is not the master key.");
+
+            for (int i = 0; i < 5; i++)
+            {
+              digitalWrite(redLEDpin, HIGH);
+              delay(50);
+              digitalWrite(redLEDpin, LOW);
+              delay(50);
+            }
+          }
+        }
+        else
+        { }
+      }
+      else
+      { }
+    }
+  }
 
   if (specialLightMode && millis() - specialLightModeTimer > 20)
   {
@@ -182,15 +363,15 @@ void loop()
     {
       if (specialLightModeCounter - snakeLenght < 0)
       {
-        strip.setPixelColor((specialLightModeCounter - snakeLenght) + specialLightModeCounterMAX, strip.Color(0, 255, 0));
+        strip.setPixelColor((specialLightModeCounter - snakeLenght) + specialLightModeCounterMAX, strip.Color(0, 0, 200));
       }
       else
       {
-        strip.setPixelColor(specialLightModeCounter - snakeLenght, strip.Color(0, 255, 0));
+        strip.setPixelColor(specialLightModeCounter - snakeLenght, strip.Color(0, 0, 200));
       }
 
       // strip.setPixelColor(specialLightModeCounter, strip.Color(150, 75, 6));
-      strip.setPixelColor(specialLightModeCounter, strip.Color(255, 0, 0));
+      strip.setPixelColor(specialLightModeCounter, strip.Color(200, 0, 0));
 
       strip.show();
     }
@@ -283,22 +464,27 @@ void loop()
   { }
 
   // new tag is available
-  if (mfrc522.PICC_IsNewCardPresent())
+  if (mfrc522.PICC_IsNewCardPresent() && (mainBools ^ 0x04))
   {
-    Serial.println("RFID Card present");
+    Serial.print("RFID Card: ");
     // NUID has been readed
     if (mfrc522.PICC_ReadCardSerial())
     {
-      if (auth())
+      if (authorizeCard())
       {
         mainBools = 0x01 ^ mainBools;
 
-        Serial.println("RFID: Token 01");
+        Serial.print("RFID: Token ");
+        for (int i = 0; i < globalConfig.adminKeys.size(); i++)
+        {
+          if (i == globalConfig.lastAdminKeyIndex)
+          {
+            Serial.println(i);
+          }
+        }
       }
       else
-      {
-        mainBools = mainBools & 0xFE;
-      }
+      { }
 
       actionTimer = millis();
 
@@ -314,15 +500,34 @@ void loop()
   { }
 }
 
-char auth()
+void getCurrentKeyID()
 {
-    for (int i = 0; i < mfrc522.uid.size; i++) {
-      if (myRFID_UID[i] != mfrc522.uid.uidByte[i])
-      {
-        return 0x00;
-      }
+  configDoc["currentKey"].clear();
+  configDoc.garbageCollect();
+
+  globalConfig.currentKey = configDoc.createNestedArray("currentKey");
+
+  for (int i = 0; i < mfrc522.uid.size; i++) {
+    globalConfig.currentKey.add((unsigned char) mfrc522.uid.uidByte[i]);
+  }
+
+  serializeJson(globalConfig.currentKey, Serial);
+  Serial.println();
+}
+
+char authorizeCard()
+{
+  getCurrentKeyID();
+
+  for (int index = 0; index < globalConfig.adminKeys.size(); index++)
+  {
+    if (globalConfig.currentKey == globalConfig.adminKeys[index])
+    {
+      globalConfig.lastAdminKeyIndex = index;
+      return 0x01;
     }
-    return 0x01;
+  }
+  return 0x00;
 }
 
 void boxLighting(int index, uint32_t color)
@@ -365,7 +570,6 @@ void boxLightingSpecial(uint32_t color)
 
 void callbackRightButton(Button2& btn)
 {
-  Serial.println(">> right");
   if (((mainBools & 0x04) >> 0x02))
   {
     effect = 0x00;
@@ -415,11 +619,67 @@ void callbackRightButtonLongClick(Button2& btn)
   specialLightModeRun = 0x01 ^ specialLightModeRun;
 }
 
-void callbackLeftButton(Button2& btn)
-{ }
-
 void callbackRightButtonDoubleClick(Button2& btn)
-{ }
+{
+  Serial.println("--- Debug: DOC Object ---");
+  serializeJsonPretty(configDoc, Serial);
+  Serial.println("\n-------------------------");
+}
+
+void callbackLeftButton(Button2& btn)
+{
+  if (mainBools ^ 0x10)
+  {
+    mainBools = 0x08 ^ mainBools;
+
+    digitalWrite(redLEDpin, ((0x08 ^ mainBools) >> 0x03));
+
+    digitalWrite(greenLEDpin, HIGH);
+
+    if ((mainBools & 0x08) >> 0x03)
+    {
+      Serial.println("Start add key mode");
+    }
+    else
+    {
+      Serial.println("Stop add key mode");
+    }
+  }
+}
+
+void callbackLeftButtonDoubleClick(Button2& btn)
+{
+  if (mainBools ^ 0x08)
+  {
+    mainBools = 0x10 ^ mainBools;
+
+    digitalWrite(redLEDpin, ((0x10 ^ mainBools) >> 0x04));
+    digitalWrite(greenLEDpin, HIGH);
+
+    if ((mainBools & 0x10) >> 0x04)
+    {
+      Serial.println("Start del key mode");
+    }
+    else
+    {
+      Serial.println("Stop del key mode");
+    }
+  }
+}
+
+void callbackLeftButtonLongClick(Button2& btn)
+{
+  globalConfig.adminKeys = globalConfig.defaultKeys;
+  saveGlobalConfiguration();
+
+  for (int i = 0; i < 5; i++)
+  {
+    digitalWrite(redLEDpin, LOW);
+    delay(50);
+    digitalWrite(redLEDpin, HIGH);
+    delay(50);
+  }
+}
 
 // Input a value 0 to 255 to get a color value.
 // The colours are a transition r - g - b - back to r.
@@ -435,4 +695,53 @@ uint32_t Wheel(byte WheelPos)
   }
   WheelPos -= 170;
   return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
+
+// Loads the configuration from a file
+void loadConfiguration(const char *filename) {
+  // Open file for reading
+  File file = SPIFFS.open(filename, "r");
+
+  // Deserialize the JSON document
+  DeserializationError error = deserializeJson(configDoc, file);
+  if (error)
+    Serial.println(F("Failed to read file, using default configuration"));
+
+  globalConfig.adminKeys = configDoc["adminKeys"].as<JsonArray>();
+  globalConfig.defaultKeys = configDoc["defaultKeys"].as<JsonArray>();
+  globalConfig.currentKey = configDoc["currentKey"].as<JsonArray>();
+  globalConfig.masterKey = configDoc["masterKey"].as<JsonArray>();
+  globalConfig.nullArray = configDoc["nullArray"].as<JsonArray>();
+
+  Serial.print("adminKeys: ");
+  serializeJson(globalConfig.adminKeys, Serial);
+  Serial.println();
+
+  Serial.print("masterKey: ");
+  serializeJson(globalConfig.masterKey, Serial);
+  Serial.println();
+
+  // Close the file (Curiously, File's destructor doesn't close the file)
+  file.close();
+}
+
+void saveGlobalConfiguration()
+{
+  // Delete existing file, otherwise the configuration is appended to the file
+  SPIFFS.remove("/config.json");
+
+  // Open file for writing
+  File file = SPIFFS.open("/config.json", FILE_WRITE);
+  if (!file) {
+    Serial.println(F("Failed to create file"));
+    return;
+  }
+
+  // Serialize JSON to file
+  if (serializeJson(configDoc, file) == 0) {
+    Serial.println(F("Failed to write to file"));
+  }
+
+  // Close the file
+  file.close();
 }
