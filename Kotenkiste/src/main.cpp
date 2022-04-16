@@ -14,16 +14,6 @@
 
 #include "Button2.h"
 
-/*
- * Button:
- * right = 25
- * left  = 35
- * 
- * LEDs:
- * red   = 32
- * green = 26
- */
-
 // https://github.com/espressif/arduino-esp32/issues/3634
 #if (RH_PLATFORM == RH_PLATFORM_ESP8266)
     // interrupt handler and related code must be in RAM on ESP8266,
@@ -108,12 +98,16 @@ void saveGlobalConfiguration();
 void getCurrentKeyID();
 char authorizeCard();
 
+void keyManagementMode();
 void callback();
 
+// Global Configuration
 Config globalConfig;
 
+// the 2 Buttons
 Button2 rightButton, leftButton;
 
+// LED Site range
 char ledRange[4][2] = {{0, 20}, {20, 30}, {30, 50}, {50, 60}};
 
 char step = 0;
@@ -195,7 +189,7 @@ void setup()
   mfrc522.PCD_WriteRegister(MFRC522::ComIEnReg, 0xA0);
   mfrc522.PCD_WriteRegister(MFRC522::DivIEnReg, 0x14);
 
-  pinMode(IRQ_PIN, INPUT_PULLUP);
+  //pinMode(IRQ_PIN, INPUT_PULLUP);
   pinMode(magnetSensorPin, INPUT_PULLUP);
 
   pinMode(magnetSensorPin, INPUT_PULLUP);
@@ -223,144 +217,12 @@ void loop()
   rightButton.loop();
   leftButton.loop();
 
+  // Add or Del mode aktiv?
   if (mainBools & 0x08 || mainBools & 0x10)
   {
+    keyManagementMode();
+
     timeoutTimer = millis();
-
-    while (mainBools & 0x08 || mainBools & 0x10)
-    {
-      leftButton.loop();
-
-      // new tag is available
-      if (mfrc522.PICC_IsNewCardPresent())
-      { 
-        // NUID has been readed
-        if (mfrc522.PICC_ReadCardSerial())
-        {
-          getCurrentKeyID();
-
-          if (globalConfig.currentKey == globalConfig.masterKey)
-          {
-            // halt PICC
-            mfrc522.PICC_HaltA();
-            // stop encryption on PCD
-            mfrc522.PCD_StopCrypto1();
-
-            digitalWrite(redLEDpin, HIGH);
-            digitalWrite(greenLEDpin, LOW);
-
-            Serial.println("Authorization by master key.");
-
-            // new tag is available
-            while (mainBools & 0x08 || mainBools & 0x10)
-            {
-              leftButton.loop();
-
-              if (mfrc522.PICC_IsNewCardPresent())
-              {
-                // NUID has been readed
-                if (mfrc522.PICC_ReadCardSerial())
-                {
-                  getCurrentKeyID();
-
-                  char notInKeys = 0x01;
-
-                  for (int i = 0; i < globalConfig.adminKeys.size(); i++)
-                  {
-                    if (globalConfig.currentKey == globalConfig.adminKeys[i])
-                    {
-                      notInKeys = 0x00;
-                    }
-                  }
-
-                  if (mainBools & 0x10)
-                  {
-                    notInKeys = 0x01 ^ notInKeys;
-                  }
-
-                  if (notInKeys)
-                  {
-                    if (0x10 ^ mainBools && 0x08 & mainBools)
-                    {
-                      if (globalConfig.currentKey == globalConfig.adminKeys[globalConfig.lastAdminKeyIndex])
-                      { }
-                      else
-                      {
-                        globalConfig.adminKeys.add(globalConfig.currentKey);
-
-                        Serial.print("Add chip ");
-                        serializeJson(globalConfig.currentKey, Serial);
-                        Serial.println("...done.");
-
-                        mainBools = mainBools & 0x0F7;
-                        saveGlobalConfiguration();
-                        digitalWrite(greenLEDpin, HIGH);
-                      }
-                    }
-                    else if (0x10 & mainBools && 0x08 ^ mainBools)
-                    {
-
-                      if (globalConfig.currentKey == globalConfig.masterKey)
-                      {
-                        Serial.println("Can not remove master key.");
-                      }
-                      else
-                      {
-                        for (int index = 0; index < globalConfig.adminKeys.size(); index++)
-                        {
-                          if (globalConfig.currentKey == globalConfig.adminKeys[index])
-                          {
-                            globalConfig.adminKeys.remove(index);
-
-                            Serial.print("Chip ");
-                            serializeJson(globalConfig.currentKey, Serial);
-                            Serial.println(" deleted");
-
-                            mainBools = mainBools & 0x0EF;
-                            saveGlobalConfiguration();
-                            digitalWrite(greenLEDpin, HIGH);
-                          }
-                        }
-                      }
-                    }
-                    
-                    // halt PICC
-                    mfrc522.PICC_HaltA();
-                    // stop encryption on PCD
-                    mfrc522.PCD_StopCrypto1();
-                  }
-                }
-                else
-                { }
-              }
-              else
-              { }
-            }
-          }
-          else
-          {
-            // halt PICC
-            mfrc522.PICC_HaltA();
-            // stop encryption on PCD
-            mfrc522.PCD_StopCrypto1();
-
-            Serial.println("This kay is not the master key.");
-
-            for (int i = 0; i < 5; i++)
-            {
-              digitalWrite(redLEDpin, HIGH);
-              delay(50);
-              digitalWrite(redLEDpin, LOW);
-              delay(50);
-            }
-          }
-        }
-        else
-        { }
-      }
-      else
-      { }
-    }
   }
 
   if (specialLightMode && millis() - specialLightModeTimer > 20)
@@ -525,10 +387,149 @@ void loop()
 
     Serial.println("Save Configuration");
     saveGlobalConfiguration();
+    delay(100);
 
     Serial.println("Going to sleep now");
 
     esp_deep_sleep_start();
+  }
+}
+
+void keyManagementMode()
+{
+  while (mainBools & 0x08 || mainBools & 0x10)
+  {
+    leftButton.loop();
+
+    // new tag is available
+    if (mfrc522.PICC_IsNewCardPresent())
+    { 
+      // NUID has been readed
+      if (mfrc522.PICC_ReadCardSerial())
+      {
+        getCurrentKeyID();
+
+        if (globalConfig.currentKey == globalConfig.masterKey)
+        {
+          // halt PICC
+          mfrc522.PICC_HaltA();
+          // stop encryption on PCD
+          mfrc522.PCD_StopCrypto1();
+
+          digitalWrite(redLEDpin, HIGH);
+          digitalWrite(greenLEDpin, LOW);
+
+          Serial.println("Authorization by master key.");
+
+          // new tag is available
+          while (mainBools & 0x08 || mainBools & 0x10)
+          {
+            leftButton.loop();
+
+            if (mfrc522.PICC_IsNewCardPresent())
+            {
+              // NUID has been readed
+              if (mfrc522.PICC_ReadCardSerial())
+              {
+                getCurrentKeyID();
+
+                char notInKeys = 0x01;
+
+                for (int i = 0; i < globalConfig.adminKeys.size(); i++)
+                {
+                  if (globalConfig.currentKey == globalConfig.adminKeys[i])
+                  {
+                    notInKeys = 0x00;
+                  }
+                }
+
+                if (mainBools & 0x10)
+                {
+                  notInKeys = 0x01 ^ notInKeys;
+                }
+
+                if (notInKeys)
+                {
+                  if (0x10 ^ mainBools && 0x08 & mainBools)
+                  {
+                    if (globalConfig.currentKey == globalConfig.adminKeys[globalConfig.lastAdminKeyIndex])
+                    { }
+                    else
+                    {
+                      globalConfig.adminKeys.add(globalConfig.currentKey);
+
+                      Serial.print("Add chip ");
+                      serializeJson(globalConfig.currentKey, Serial);
+                      Serial.println("...done.");
+
+                      mainBools = mainBools & 0x0F7;
+                      saveGlobalConfiguration();
+                      digitalWrite(greenLEDpin, HIGH);
+                    }
+                  }
+                  else if (0x10 & mainBools && 0x08 ^ mainBools)
+                  {
+
+                    if (globalConfig.currentKey == globalConfig.masterKey)
+                    {
+                      Serial.println("Can not remove master key.");
+                    }
+                    else
+                    {
+                      for (int index = 0; index < globalConfig.adminKeys.size(); index++)
+                      {
+                        if (globalConfig.currentKey == globalConfig.adminKeys[index])
+                        {
+                          globalConfig.adminKeys.remove(index);
+
+                          Serial.print("Chip ");
+                          serializeJson(globalConfig.currentKey, Serial);
+                          Serial.println(" deleted");
+
+                          mainBools = mainBools & 0x0EF;
+                          saveGlobalConfiguration();
+                          digitalWrite(greenLEDpin, HIGH);
+                        }
+                      }
+                    }
+                  }
+                  
+                  // halt PICC
+                  mfrc522.PICC_HaltA();
+                  // stop encryption on PCD
+                  mfrc522.PCD_StopCrypto1();
+                }
+              }
+              else
+              { }
+            }
+            else
+            { }
+          }
+        }
+        else
+        {
+          // halt PICC
+          mfrc522.PICC_HaltA();
+          // stop encryption on PCD
+          mfrc522.PCD_StopCrypto1();
+
+          Serial.println("This kay is not the master key.");
+
+          for (int i = 0; i < 5; i++)
+          {
+            digitalWrite(redLEDpin, HIGH);
+            delay(50);
+            digitalWrite(redLEDpin, LOW);
+            delay(50);
+          }
+        }
+      }
+      else
+      { }
+    }
+    else
+    { }
   }
 }
 
@@ -808,5 +809,5 @@ void saveGlobalConfiguration()
   file.close();
 }
 
-void callback()
+void IRAM_ATTR callback()
 { }
